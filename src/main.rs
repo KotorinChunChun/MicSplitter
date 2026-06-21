@@ -6,6 +6,8 @@ use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 mod config;
 mod app;
+mod tray;
+mod hotkey;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 設定ファイルの読み込み
@@ -69,13 +71,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => return Err("サポートされていない入力フォーマットです (f32のみ対応)".into()),
     };
 
+    let in_enabled = Arc::new(AtomicBool::new(cfg.input_enabled));
     let out1_enabled = Arc::new(AtomicBool::new(cfg.output_device_1_enabled));
     let out2_enabled = Arc::new(AtomicBool::new(cfg.output_device_2_enabled));
     let mon_enabled = Arc::new(AtomicBool::new(cfg.monitor_enabled));
 
-    let stream1 = build_output(&output1_device, "Output 1", cons1, channels, out1_enabled.clone(), 1.0)?;
-    let stream2 = build_output(&output2_device, "Output 2", cons2, channels, out2_enabled.clone(), 1.0)?;
-    let stream_mon = build_output(&monitor_device, "Monitor", cons_mon, channels, mon_enabled.clone(), cfg.monitor_volume)?;
+    let stream1 = build_output(&output1_device, "Output 1", cons1, channels, in_enabled.clone(), out1_enabled.clone(), 1.0)?;
+    let stream2 = build_output(&output2_device, "Output 2", cons2, channels, in_enabled.clone(), out2_enabled.clone(), 1.0)?;
+    let stream_mon = build_output(&monitor_device, "Monitor", cons_mon, channels, in_enabled.clone(), mon_enabled.clone(), cfg.monitor_volume)?;
 
     // 再生開始
     input_stream.play()?;
@@ -85,15 +88,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("音声転送を開始し、GUIウィンドウを起動します。");
 
+    let should_show = Arc::new(AtomicBool::new(false));
+
     let app = app::MicSplitterApp {
         config: cfg,
-        out1_enabled,
-        out2_enabled,
-        mon_enabled,
+        in_enabled: in_enabled.clone(),
+        out1_enabled: out1_enabled.clone(),
+        out2_enabled: out2_enabled.clone(),
+        mon_enabled: mon_enabled.clone(),
         _input_stream: input_stream,
         _stream1: stream1,
         _stream2: stream2,
         _stream_mon: stream_mon,
+        is_hidden: false,
+        should_show: should_show.clone(),
     };
 
     let native_options = eframe::NativeOptions::default();
@@ -103,6 +111,120 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(|cc| {
             // 日本語フォントをロード
             app::setup_custom_fonts(&cc.egui_ctx);
+
+            // イベント監視とOSメッセージループのための専用スレッド
+            let ctx_clone = cc.egui_ctx.clone();
+            
+            // 状態変更用のArcクローン
+            let in_clone = in_enabled.clone();
+            let out1_clone = out1_enabled.clone();
+            let out2_clone = out2_enabled.clone();
+            let mon_clone = mon_enabled.clone();
+            let should_show_clone = should_show.clone();
+
+            std::thread::spawn(move || {
+                // スレッド内でトレイとホットキーを初期化
+                let _tray = tray::create_tray_icon().ok();
+                let hotkeys = match hotkey::register_hotkeys() {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        println!("ホットキーの登録に失敗しました: {:?}", e);
+                        None
+                    }
+                };
+                
+                // HotkeyのIDだけを抽出してポーリングスレッドに渡す
+                let (mon_id, out1_id, out2_id, in_id, swap_id) = if let Some(ref h) = hotkeys {
+                    (Some(h.toggle_mon_id), Some(h.toggle_out1_id), Some(h.toggle_out2_id), Some(h.toggle_in_id), Some(h.toggle_swap_id))
+                } else {
+                    (None, None, None, None, None)
+                };
+
+                // イベントポーリング用スレッドをさらに分ける
+                // (GetMessageW はブロックするため、try_recv 監視用にもう一つスレッドを立てるのが簡単)
+                std::thread::spawn(move || {
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        
+                        // トレイクリック (キューに溜まったイベントをすべて消化する)
+                        while let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
+                            if let tray_icon::TrayIconEvent::Click { button: tray_icon::MouseButton::Left, .. } = event {
+                                unsafe {
+                                    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_RESTORE, SW_SHOW, SetForegroundWindow};
+                                    let window_name: Vec<u16> = "MicSplitter\0".encode_utf16().collect();
+                                    let hwnd = FindWindowW(std::ptr::null(), window_name.as_ptr());
+                                    if hwnd != std::ptr::null_mut() {
+                                        ShowWindow(hwnd, SW_RESTORE);
+                                        ShowWindow(hwnd, SW_SHOW);
+                                        SetForegroundWindow(hwnd);
+                                    }
+                                }
+                                should_show_clone.store(true, Ordering::SeqCst);
+                                ctx_clone.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
+                                ctx_clone.request_repaint();
+                            }
+                        }
+
+                        // トレイメニュー (キューに溜まったイベントをすべて消化する)
+                        while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
+                            if event.id.0 == "show" {
+                                unsafe {
+                                    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_RESTORE, SW_SHOW, SetForegroundWindow};
+                                    let window_name: Vec<u16> = "MicSplitter\0".encode_utf16().collect();
+                                    let hwnd = FindWindowW(std::ptr::null(), window_name.as_ptr());
+                                    if hwnd != std::ptr::null_mut() {
+                                        ShowWindow(hwnd, SW_RESTORE);
+                                        ShowWindow(hwnd, SW_SHOW);
+                                        SetForegroundWindow(hwnd);
+                                    }
+                                }
+                                should_show_clone.store(true, Ordering::SeqCst);
+                                ctx_clone.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
+                                ctx_clone.request_repaint();
+                            } else if event.id.0 == "quit" {
+                                std::process::exit(0);
+                            }
+                        }
+
+                        // グローバルホットキー (キューに溜まったイベントをすべて消化する)
+                        while let Ok(event) = global_hotkey::GlobalHotKeyEvent::receiver().try_recv() {
+                            if event.state == global_hotkey::HotKeyState::Pressed {
+                                if Some(event.id) == mon_id {
+                                    mon_clone.store(!mon_clone.load(Ordering::Relaxed), Ordering::Relaxed);
+                                } else if Some(event.id) == out1_id {
+                                    out1_clone.store(!out1_clone.load(Ordering::Relaxed), Ordering::Relaxed);
+                                } else if Some(event.id) == out2_id {
+                                    out2_clone.store(!out2_clone.load(Ordering::Relaxed), Ordering::Relaxed);
+                                } else if Some(event.id) == in_id {
+                                    in_clone.store(!in_clone.load(Ordering::Relaxed), Ordering::Relaxed);
+                                } else if Some(event.id) == swap_id {
+                                    let out1 = out1_clone.load(Ordering::Relaxed);
+                                    let out2 = out2_clone.load(Ordering::Relaxed);
+                                    if out1 && !out2 {
+                                        out1_clone.store(false, Ordering::Relaxed);
+                                        out2_clone.store(true, Ordering::Relaxed);
+                                    } else {
+                                        out1_clone.store(true, Ordering::Relaxed);
+                                        out2_clone.store(false, Ordering::Relaxed);
+                                    }
+                                }
+                                ctx_clone.request_repaint();
+                            }
+                        }
+                    }
+                });
+
+                // OSメッセージループを回す
+                use windows_sys::Win32::UI::WindowsAndMessaging::{GetMessageW, DispatchMessageW, TranslateMessage, MSG};
+                unsafe {
+                    let mut msg: MSG = std::mem::zeroed();
+                    while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
+            });
+
             Ok(Box::new(app))
         }),
     ).map_err(|e| e.into())
@@ -113,6 +235,7 @@ fn build_output<C>(
     name: &str,
     mut consumer: C,
     in_channels: usize,
+    in_enabled: Arc<AtomicBool>,
     enabled: Arc<AtomicBool>,
     volume: f32,
 ) -> Result<cpal::Stream, Box<dyn std::error::Error>>
@@ -136,12 +259,14 @@ where
             let stream = device.build_output_stream(
                 out_config.into(),
                 move |data: &mut [f32], _: &_| {
+                    let is_in_enabled = in_enabled.load(Ordering::Relaxed);
                     let is_enabled = enabled.load(Ordering::Relaxed);
+                    let is_active = is_in_enabled && is_enabled;
                     let mut input_buffer = vec![0.0; in_channels];
                     for frame in data.chunks_mut(out_channels) {
                         for i in 0..in_channels {
                             if let Some(s) = consumer.try_pop() {
-                                input_buffer[i] = if is_enabled { s * volume } else { 0.0 };
+                                input_buffer[i] = if is_active { s * volume } else { 0.0 };
                             } else {
                                 input_buffer[i] = 0.0;
                             }

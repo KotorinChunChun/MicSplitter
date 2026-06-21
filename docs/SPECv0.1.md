@@ -31,7 +31,9 @@
   - **「トグル（排他）切り替え」を既定（デフォルト）の動作**とし、1ボタンで出力先AとBを排他的にスイッチする（設定により、個別ON/OFFモードにも変更可能とする）。
   - ホットキーの初期値は他のアプリケーションと極めて衝突しにくいキー組み合わせ（例: `Ctrl+Alt+Win+F9`（出力1切り替え）、`Ctrl+Alt+Win+F10`（出力2切り替え））を設定し、設定ファイル（`config.json`）およびGUI設定パネルから、後からユーザーが任意に変更できる仕様とする。
   - トグルモード時の初期状態は、前回の設定状態（AかBか）を保持します。初回起動時の既定は出力デバイス1（仮想マイクA）をONとします。
-  - 自分用の「モニター出力」のON/OFF（ミュート/アンミュート）も設定画面やホットキーから切り替え可能とする。
+  - 自分用の「モニター出力」のON/OFF（ミュート/アンミュート）も設定画面やホットキーから切り替え可能とする。（キーバインドは`Ctrl+Alt+Win+F8`）
+  - **入力自体のミュート**も設定画面やホットキーから切り替え可能とする。（キーバインドは`Ctrl+Alt+Win+F7`）
+  - **出力1・2の排他切り替え（スワップ）** ホットキーを追加し、現在の状態に関わらず必ず「どちらか片方だけがON」の状態へ交互に切り替える。（キーバインドは`Ctrl+Alt+Win+F11`）
 
 ---
 
@@ -158,6 +160,7 @@
   "output_device_1_name": "CABLE Input (VB-Audio Virtual Cable)",
   "output_device_2_name": "CABLE-B Input (VB-Audio Cable B)",
   "monitor_device_name": "スピーカー (Realtek Audio)",
+  "input_enabled": true,
   "output_device_1_enabled": true,
   "output_device_2_enabled": false,
   "monitor_enabled": false,

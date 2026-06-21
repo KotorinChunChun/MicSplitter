@@ -3,11 +3,13 @@ use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub input_device_name: String,
     pub output_device_1_name: String,
     pub output_device_2_name: String,
     pub monitor_device_name: String,
+    pub input_enabled: bool,
     pub output_device_1_enabled: bool,
     pub output_device_2_enabled: bool,
     pub monitor_enabled: bool,
@@ -25,6 +27,7 @@ impl Default for Config {
             output_device_1_name: "CABLE-C Input".to_string(),
             output_device_2_name: "CABLE-D Input".to_string(),
             monitor_device_name: "GAME (BRIDGE CAST V2)".to_string(),
+            input_enabled: true,
             output_device_1_enabled: true,
             output_device_2_enabled: false,
             monitor_enabled: true,

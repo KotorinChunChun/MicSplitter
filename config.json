@@ -3,6 +3,7 @@
   "output_device_1_name": "CABLE-C Input",
   "output_device_2_name": "CABLE-D Input",
   "monitor_device_name": "GAME (BRIDGE CAST V2)",
+  "input_enabled": true,
   "output_device_1_enabled": true,
   "output_device_2_enabled": true,
   "monitor_enabled": true,
