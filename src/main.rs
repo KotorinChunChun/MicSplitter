@@ -2,10 +2,10 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::HeapRb;
-use std::time::Duration;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 mod config;
+mod app;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 設定ファイルの読み込み
@@ -83,12 +83,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     stream2.play()?;
     stream_mon.play()?;
 
-    println!("音声の転送を開始しました。終了するには Ctrl+C を押してください。");
-    
-    // 無限ループで待機
-    loop {
-        std::thread::sleep(Duration::from_secs(1));
-    }
+    println!("音声転送を開始し、GUIウィンドウを起動します。");
+
+    let app = app::MicSplitterApp {
+        config: cfg,
+        out1_enabled,
+        out2_enabled,
+        mon_enabled,
+        _input_stream: input_stream,
+        _stream1: stream1,
+        _stream2: stream2,
+        _stream_mon: stream_mon,
+    };
+
+    let native_options = eframe::NativeOptions::default();
+    eframe::run_native(
+        "MicSplitter",
+        native_options,
+        Box::new(|cc| {
+            // 日本語フォントをロード
+            app::setup_custom_fonts(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
+    ).map_err(|e| e.into())
 }
 
 fn build_output<C>(
