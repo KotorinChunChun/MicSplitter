@@ -1,0 +1,14 @@
+{
+  "input_device_name": "MIC (BRIDGE CAST V2)",
+  "output_device_1_name": "CABLE-C Input",
+  "output_device_2_name": "CABLE-D Input",
+  "monitor_device_name": "GAME (BRIDGE CAST V2)",
+  "output_device_1_enabled": true,
+  "output_device_2_enabled": false,
+  "monitor_enabled": true,
+  "monitor_volume": 0.8,
+  "switching_mode": "toggle",
+  "output_device_1_hotkey": "Ctrl+Alt+Win+F9",
+  "output_device_2_hotkey": "Ctrl+Alt+Win+F10",
+  "auto_start": false
+}
