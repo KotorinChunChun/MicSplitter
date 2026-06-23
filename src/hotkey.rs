@@ -1,5 +1,6 @@
 use global_hotkey::{GlobalHotKeyManager, hotkey::{HotKey, Modifiers, Code}};
 
+#[allow(dead_code)]
 pub struct Hotkeys {
     pub manager: GlobalHotKeyManager,
     pub toggle_mon_id: u32,

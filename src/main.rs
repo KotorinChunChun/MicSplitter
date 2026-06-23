@@ -1,16 +1,12 @@
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::SampleFormat;
-use ringbuf::traits::{Consumer, Producer, Split};
-use ringbuf::HeapRb;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 mod config;
+mod constants;
 mod app;
 mod tray;
 mod hotkey;
 mod audio;
-
-use config::Config;
+mod ui_helpers;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. コマンドライン引数の解析
@@ -21,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         use windows_sys::Win32::System::Threading::CreateMutexW;
         use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
-        let mutex_name: Vec<u16> = "Global\\MicSplitterMutex\0".encode_utf16().collect();
+        let mutex_name: Vec<u16> = format!("{}\0", constants::MUTEX_NAME).encode_utf16().collect();
         let h_mutex = CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr());
         
         let is_first = if h_mutex == std::ptr::null_mut() {
@@ -33,19 +29,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if !is_first {
             // 二重起動時は、既存プロセスへ表示命令を投げて終了
             if let Ok(socket) = std::net::UdpSocket::bind("127.0.0.1:0") {
-                let _ = socket.send_to(b"show", "127.0.0.1:45123");
+                let _ = socket.send_to(b"show", constants::IPC_ADDR);
             }
             return Ok(());
         }
     }
 
     // 3. UDPリスナーの設定 (既存プロセス用)
-    let udp_receiver = std::net::UdpSocket::bind("127.0.0.1:45123").ok();
+    let udp_receiver = std::net::UdpSocket::bind(constants::IPC_ADDR).ok();
     if let Some(ref socket) = udp_receiver {
         let _ = socket.set_nonblocking(true);
     }
 
-    let mut cfg = config::load_config("config.json");
+    let cfg = config::load_config(constants::CONFIG_FILE);
 
     let in_enabled = Arc::new(AtomicBool::new(cfg.input_enabled));
     let out1_enabled = Arc::new(AtomicBool::new(cfg.output_device_1_enabled));
@@ -89,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut last_inputs = audio::get_input_devices();
         let mut last_outputs = audio::get_output_devices();
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            std::thread::sleep(std::time::Duration::from_secs(constants::DEVICE_POLL_INTERVAL_SECS));
             let inputs = audio::get_input_devices();
             let outputs = audio::get_output_devices();
             if inputs != last_inputs || outputs != last_outputs {
@@ -121,10 +117,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         output_devices: audio::get_output_devices(),
         is_hidden: is_autostart,
         should_show: should_show.clone(),
-        in_meter_state: app::VolumeMeterState { display_value: 0.0, peak_value: 0.0, peak_time: 0.0 },
-        out1_meter_state: app::VolumeMeterState { display_value: 0.0, peak_value: 0.0, peak_time: 0.0 },
-        out2_meter_state: app::VolumeMeterState { display_value: 0.0, peak_value: 0.0, peak_time: 0.0 },
-        mon_meter_state: app::VolumeMeterState { display_value: 0.0, peak_value: 0.0, peak_time: 0.0 },
+        in_meter_state: ui_helpers::VolumeMeterState::default(),
+        out1_meter_state: ui_helpers::VolumeMeterState::default(),
+        out2_meter_state: ui_helpers::VolumeMeterState::default(),
+        mon_meter_state: ui_helpers::VolumeMeterState::default(),
         in_device_info,
         out1_device_info,
         out2_device_info,
@@ -152,7 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     native_options.viewport = viewport;
 
     eframe::run_native(
-        "MicSplitter",
+        constants::APP_NAME,
         native_options,
         Box::new(|cc| {
             // 日本語フォントをロード
@@ -209,6 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             DispatchMessageW(&msg);
                         }
 
+                        // トレイアイコンの状態を同期
                         let current_in = in_clone.load(Ordering::Relaxed);
                         let current_out1 = out1_clone.load(Ordering::Relaxed);
                         let current_out2 = out2_clone.load(Ordering::Relaxed);
@@ -233,49 +230,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
-                        // トレイクリック (キューに溜まったイベントをすべて消化する)
+                        // トレイクリック（キューに溜まったイベントをすべて消化する）
                         while let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
                             if let tray_icon::TrayIconEvent::Click { button: tray_icon::MouseButton::Left, .. } = event {
-                                use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_RESTORE, SW_SHOW, SetForegroundWindow};
-                                let window_name: Vec<u16> = "MicSplitter\0".encode_utf16().collect();
-                                let hwnd = FindWindowW(std::ptr::null(), window_name.as_ptr());
-                                if hwnd != std::ptr::null_mut() {
-                                    ShowWindow(hwnd, SW_RESTORE);
-                                    ShowWindow(hwnd, SW_SHOW);
-                                    SetForegroundWindow(hwnd);
-                                }
+                                ui_helpers::show_and_focus_window();
                                 should_show_clone.store(true, Ordering::SeqCst);
                                 ctx_clone.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
                                 ctx_clone.request_repaint();
                             }
                         }
 
-                        // トレイメニュー (キューに溜まったイベントをすべて消化する)
+                        // トレイメニュー（キューに溜まったイベントをすべて消化する）
                         while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
                             if event.id.0 == "show" {
-                                use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_RESTORE, SW_SHOW, SetForegroundWindow};
-                                let window_name: Vec<u16> = "MicSplitter\0".encode_utf16().collect();
-                                let hwnd = FindWindowW(std::ptr::null(), window_name.as_ptr());
-                                if hwnd != std::ptr::null_mut() {
-                                    ShowWindow(hwnd, SW_RESTORE);
-                                    ShowWindow(hwnd, SW_SHOW);
-                                    SetForegroundWindow(hwnd);
-                                }
+                                ui_helpers::show_and_focus_window();
                                 should_show_clone.store(true, Ordering::SeqCst);
                                 ctx_clone.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
                                 ctx_clone.request_repaint();
                             } else if event.id.0 == "quit" {
                                 if let Some((x, y)) = *window_pos_clone.lock().unwrap() {
-                                    let mut cfg_to_save = config::load_config("config.json");
+                                    let mut cfg_to_save = config::load_config(constants::CONFIG_FILE);
                                     cfg_to_save.window_pos_x = Some(x);
                                     cfg_to_save.window_pos_y = Some(y);
-                                    config::save_config("config.json", &cfg_to_save);
+                                    config::save_config(constants::CONFIG_FILE, &cfg_to_save);
                                 }
                                 std::process::exit(0);
                             }
                         }
 
-                        // グローバルホットキー (キューに溜まったイベントをすべて消化する)
+                        // グローバルホットキー（キューに溜まったイベントをすべて消化する）
                         while let Ok(event) = global_hotkey::GlobalHotKeyEvent::receiver().try_recv() {
                             if event.state == global_hotkey::HotKeyState::Pressed {
                                 let is_toggle = is_toggle_clone.load(Ordering::Relaxed);
@@ -306,7 +289,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
-                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        std::thread::sleep(std::time::Duration::from_millis(constants::EVENT_LOOP_INTERVAL_MS));
                     }
                 }
             });
@@ -315,5 +298,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     ).map_err(|e| e.into())
 }
-
-

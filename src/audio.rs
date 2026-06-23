@@ -158,7 +158,7 @@ pub fn build_all_streams(
     let sample_rate = input_config.sample_rate();
     let channels = input_config.channels() as usize;
 
-    let latency_ms = 50.0;
+    let latency_ms = crate::constants::AUDIO_LATENCY_MS;
     let frames = (sample_rate as f32 * (latency_ms / 1000.0)) as usize;
     let buffer_capacity = frames * channels;
 
