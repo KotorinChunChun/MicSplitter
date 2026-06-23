@@ -8,103 +8,149 @@ mod config;
 mod app;
 mod tray;
 mod hotkey;
+mod audio;
+
+use config::Config;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 設定ファイルの読み込み
-    let cfg = config::load_config("config.json");
+    // 1. コマンドライン引数の解析
+    let args: Vec<String> = std::env::args().collect();
+    let is_autostart = args.iter().any(|a| a == "--autostart");
 
-    let host = cpal::default_host();
+    // 2. 単一インスタンス制限 (Named Mutex)
+    unsafe {
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+        use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+        let mutex_name: Vec<u16> = "Global\\MicSplitterMutex\0".encode_utf16().collect();
+        let h_mutex = CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr());
+        
+        let is_first = if h_mutex == std::ptr::null_mut() {
+            true
+        } else {
+            GetLastError() != ERROR_ALREADY_EXISTS
+        };
 
-    // デバイス検索
-    let input_device = find_input_device(&host, &cfg.input_device_name)
-        .unwrap_or_else(|| host.default_input_device().expect("入力デバイスが見つかりません"));
-    let output1_device = find_output_device(&host, &cfg.output_device_1_name)
-        .unwrap_or_else(|| host.default_output_device().expect("出力デバイス1が見つかりません"));
-    let output2_device = find_output_device(&host, &cfg.output_device_2_name)
-        .unwrap_or_else(|| host.default_output_device().expect("出力デバイス2が見つかりません"));
-    let monitor_device = find_output_device(&host, &cfg.monitor_device_name)
-        .unwrap_or_else(|| host.default_output_device().expect("モニターデバイスが見つかりません"));
+        if !is_first {
+            // 二重起動時は、既存プロセスへ表示命令を投げて終了
+            if let Ok(socket) = std::net::UdpSocket::bind("127.0.0.1:0") {
+                let _ = socket.send_to(b"show", "127.0.0.1:45123");
+            }
+            return Ok(());
+        }
+    }
 
-    println!("使用デバイス:");
-    println!("  Input   : {}", input_device);
-    println!("  Output 1: {}", output1_device);
-    println!("  Output 2: {}", output2_device);
-    println!("  Monitor : {}", monitor_device);
+    // 3. UDPリスナーの設定 (既存プロセス用)
+    let udp_receiver = std::net::UdpSocket::bind("127.0.0.1:45123").ok();
+    if let Some(ref socket) = udp_receiver {
+        let _ = socket.set_nonblocking(true);
+    }
 
-    // デフォルトの設定を取得
-    let input_config = input_device.default_input_config()?;
-    let sample_rate = input_config.sample_rate();
-    let channels = input_config.channels() as usize;
-
-    println!("入力フォーマット: {} Hz, {} ch, {:?}", sample_rate, channels, input_config.sample_format());
-
-    // バッファサイズ: 50ms 相当のフレーム数 * チャンネル数
-    let latency_ms = 50.0;
-    let frames = (sample_rate as f32 * (latency_ms / 1000.0)) as usize;
-    let buffer_capacity = frames * channels;
-
-    // 3つのリングバッファを作成
-    let rb1 = HeapRb::<f32>::new(buffer_capacity);
-    let rb2 = HeapRb::<f32>::new(buffer_capacity);
-    let rb_mon = HeapRb::<f32>::new(buffer_capacity);
-
-    let (mut prod1, cons1) = rb1.split();
-    let (mut prod2, cons2) = rb2.split();
-    let (mut prod_mon, cons_mon) = rb_mon.split();
-
-    // 入力ストリームの構築
-    let err_fn = |err| eprintln!("Input error: {}", err);
-    let input_stream = match input_config.sample_format() {
-        SampleFormat::F32 => input_device.build_input_stream(
-            input_config.into(),
-            move |data: &[f32], _: &_| {
-                // すべてのバッファに書き込み
-                for &sample in data {
-                    let _ = prod1.try_push(sample);
-                    let _ = prod2.try_push(sample);
-                    let _ = prod_mon.try_push(sample);
-                }
-            },
-            err_fn,
-            None,
-        ).map_err(|e| format!("入力デバイス ({}) のストリーム初期化に失敗: {}", input_device, e))?,
-        _ => return Err("サポートされていない入力フォーマットです (f32のみ対応)".into()),
-    };
+    let mut cfg = config::load_config("config.json");
 
     let in_enabled = Arc::new(AtomicBool::new(cfg.input_enabled));
     let out1_enabled = Arc::new(AtomicBool::new(cfg.output_device_1_enabled));
     let out2_enabled = Arc::new(AtomicBool::new(cfg.output_device_2_enabled));
     let mon_enabled = Arc::new(AtomicBool::new(cfg.monitor_enabled));
 
-    let stream1 = build_output(&output1_device, "Output 1", cons1, channels, in_enabled.clone(), out1_enabled.clone(), 1.0)?;
-    let stream2 = build_output(&output2_device, "Output 2", cons2, channels, in_enabled.clone(), out2_enabled.clone(), 1.0)?;
-    let stream_mon = build_output(&monitor_device, "Monitor", cons_mon, channels, in_enabled.clone(), mon_enabled.clone(), cfg.monitor_volume)?;
+    let is_toggle_mode = Arc::new(AtomicBool::new(cfg.switching_mode == "toggle"));
+    let mon_volume_bits = Arc::new(std::sync::atomic::AtomicU32::new(cfg.monitor_volume.to_bits()));
 
-    // 再生開始
-    input_stream.play()?;
-    stream1.play()?;
-    stream2.play()?;
-    stream_mon.play()?;
-
-    println!("音声転送を開始し、GUIウィンドウを起動します。");
+    let in_rms_bits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let out1_rms_bits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let out2_rms_bits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let mon_rms_bits = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
     let should_show = Arc::new(AtomicBool::new(false));
+    let window_pos = Arc::new(std::sync::Mutex::new(
+        if let (Some(x), Some(y)) = (cfg.window_pos_x, cfg.window_pos_y) { Some((x, y)) } else { None }
+    ));
+
+    let streams = audio::build_all_streams(
+        &cfg,
+        in_enabled.clone(),
+        out1_enabled.clone(),
+        out2_enabled.clone(),
+        mon_enabled.clone(),
+        mon_volume_bits.clone(),
+        in_rms_bits.clone(),
+        out1_rms_bits.clone(),
+        out2_rms_bits.clone(),
+        mon_rms_bits.clone(),
+    )?;
+
+    let host = cpal::default_host();
+    let in_device_info = audio::get_device_info(&host, &cfg.input_device_name, true);
+    let out1_device_info = audio::get_device_info(&host, &cfg.output_device_1_name, false);
+    let out2_device_info = audio::get_device_info(&host, &cfg.output_device_2_name, false);
+    let mon_device_info = audio::get_device_info(&host, &cfg.monitor_device_name, false);
+
+    let (device_refresh_tx, device_refresh_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut last_inputs = audio::get_input_devices();
+        let mut last_outputs = audio::get_output_devices();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let inputs = audio::get_input_devices();
+            let outputs = audio::get_output_devices();
+            if inputs != last_inputs || outputs != last_outputs {
+                last_inputs = inputs;
+                last_outputs = outputs;
+                let _ = device_refresh_tx.send(());
+            }
+        }
+    });
 
     let app = app::MicSplitterApp {
-        config: cfg,
+        config: cfg.clone(),
         in_enabled: in_enabled.clone(),
         out1_enabled: out1_enabled.clone(),
         out2_enabled: out2_enabled.clone(),
         mon_enabled: mon_enabled.clone(),
-        _input_stream: input_stream,
-        _stream1: stream1,
-        _stream2: stream2,
-        _stream_mon: stream_mon,
-        is_hidden: false,
+        is_toggle_mode: is_toggle_mode.clone(),
+        mon_volume_bits: mon_volume_bits.clone(),
+        in_rms_bits,
+        out1_rms_bits,
+        out2_rms_bits,
+        mon_rms_bits,
+        _input_stream: Some(streams.input_stream),
+        _stream1: streams.stream1,
+        _stream2: streams.stream2,
+        _stream_mon: streams.stream_mon,
+        stream_error: None,
+        input_devices: audio::get_input_devices(),
+        output_devices: audio::get_output_devices(),
+        is_hidden: is_autostart,
         should_show: should_show.clone(),
+        in_meter_state: app::VolumeMeterState { display_value: 0.0, peak_value: 0.0, peak_time: 0.0 },
+        out1_meter_state: app::VolumeMeterState { display_value: 0.0, peak_value: 0.0, peak_time: 0.0 },
+        out2_meter_state: app::VolumeMeterState { display_value: 0.0, peak_value: 0.0, peak_time: 0.0 },
+        mon_meter_state: app::VolumeMeterState { display_value: 0.0, peak_value: 0.0, peak_time: 0.0 },
+        in_device_info,
+        out1_device_info,
+        out2_device_info,
+        mon_device_info,
+        device_refresh_rx: Some(device_refresh_rx),
+        window_pos: window_pos.clone(),
     };
 
-    let native_options = eframe::NativeOptions::default();
+    let mut native_options = eframe::NativeOptions::default();
+    let mut viewport = eframe::egui::ViewportBuilder::default().with_visible(!is_autostart);
+
+    if let (Some(mut x), Some(mut y)) = (cfg.window_pos_x, cfg.window_pos_y) {
+        unsafe {
+            use windows_sys::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONULL};
+            use windows_sys::Win32::Foundation::POINT;
+            let pt = POINT { x: x as i32, y: y as i32 };
+            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONULL);
+            if hmon == std::ptr::null_mut() {
+                x = 0.0;
+                y = 0.0;
+            }
+        }
+        viewport = viewport.with_position(eframe::egui::pos2(x, y));
+    }
+    native_options.viewport = viewport;
+
     eframe::run_native(
         "MicSplitter",
         native_options,
@@ -120,11 +166,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let out1_clone = out1_enabled.clone();
             let out2_clone = out2_enabled.clone();
             let mon_clone = mon_enabled.clone();
+            let is_toggle_clone = is_toggle_mode.clone();
             let should_show_clone = should_show.clone();
+            let window_pos_clone = window_pos.clone();
+            let udp_receiver = udp_receiver;
+            let cfg_clone = cfg.clone();
 
             std::thread::spawn(move || {
                 // スレッド内でトレイとホットキーを初期化
-                let _tray = tray::create_tray_icon().ok();
+                let initial_in = in_clone.load(Ordering::Relaxed);
+                let initial_out1 = out1_clone.load(Ordering::Relaxed);
+                let initial_out2 = out2_clone.load(Ordering::Relaxed);
+                let tray_opt = tray::create_tray_icon(initial_in, initial_out1, initial_out2, &cfg_clone).ok();
                 let hotkeys = match hotkey::register_hotkeys() {
                     Ok(h) => Some(h),
                     Err(e) => {
@@ -133,31 +186,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
                 
-                // HotkeyのIDだけを抽出してポーリングスレッドに渡す
+                // HotkeyのIDだけを抽出
                 let (mon_id, out1_id, out2_id, in_id, swap_id) = if let Some(ref h) = hotkeys {
                     (Some(h.toggle_mon_id), Some(h.toggle_out1_id), Some(h.toggle_out2_id), Some(h.toggle_in_id), Some(h.toggle_swap_id))
                 } else {
                     (None, None, None, None, None)
                 };
 
-                // イベントポーリング用スレッドをさらに分ける
-                // (GetMessageW はブロックするため、try_recv 監視用にもう一つスレッドを立てるのが簡単)
-                std::thread::spawn(move || {
+                use windows_sys::Win32::UI::WindowsAndMessaging::{PeekMessageW, DispatchMessageW, TranslateMessage, MSG, PM_REMOVE};
+                unsafe {
+                    let mut msg: MSG = std::mem::zeroed();
+                    let mut last_in = initial_in;
+                    let mut last_out1 = initial_out1;
+                    let mut last_out2 = initial_out2;
+
                     loop {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                        
+                        while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) > 0 {
+                            if msg.message == 0x0012 /* WM_QUIT */ {
+                                return;
+                            }
+                            TranslateMessage(&msg);
+                            DispatchMessageW(&msg);
+                        }
+
+                        let current_in = in_clone.load(Ordering::Relaxed);
+                        let current_out1 = out1_clone.load(Ordering::Relaxed);
+                        let current_out2 = out2_clone.load(Ordering::Relaxed);
+                        if current_in != last_in || current_out1 != last_out1 || current_out2 != last_out2 {
+                            if let Some(ref tray) = tray_opt {
+                                tray::update_tray_icon(&tray.tray_icon, current_in, current_out1, current_out2, &cfg_clone);
+                            }
+                            last_in = current_in;
+                            last_out1 = current_out1;
+                            last_out2 = current_out2;
+                        }
+
+                        // UDPによる二重起動表示コマンドの受信
+                        if let Some(ref socket) = udp_receiver {
+                            let mut buf = [0; 16];
+                            if let Ok((size, _)) = socket.recv_from(&mut buf) {
+                                if &buf[..size] == b"show" {
+                                    should_show_clone.store(true, Ordering::SeqCst);
+                                    ctx_clone.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
+                                    ctx_clone.request_repaint();
+                                }
+                            }
+                        }
+
                         // トレイクリック (キューに溜まったイベントをすべて消化する)
                         while let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
                             if let tray_icon::TrayIconEvent::Click { button: tray_icon::MouseButton::Left, .. } = event {
-                                unsafe {
-                                    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_RESTORE, SW_SHOW, SetForegroundWindow};
-                                    let window_name: Vec<u16> = "MicSplitter\0".encode_utf16().collect();
-                                    let hwnd = FindWindowW(std::ptr::null(), window_name.as_ptr());
-                                    if hwnd != std::ptr::null_mut() {
-                                        ShowWindow(hwnd, SW_RESTORE);
-                                        ShowWindow(hwnd, SW_SHOW);
-                                        SetForegroundWindow(hwnd);
-                                    }
+                                use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_RESTORE, SW_SHOW, SetForegroundWindow};
+                                let window_name: Vec<u16> = "MicSplitter\0".encode_utf16().collect();
+                                let hwnd = FindWindowW(std::ptr::null(), window_name.as_ptr());
+                                if hwnd != std::ptr::null_mut() {
+                                    ShowWindow(hwnd, SW_RESTORE);
+                                    ShowWindow(hwnd, SW_SHOW);
+                                    SetForegroundWindow(hwnd);
                                 }
                                 should_show_clone.store(true, Ordering::SeqCst);
                                 ctx_clone.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
@@ -168,20 +253,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // トレイメニュー (キューに溜まったイベントをすべて消化する)
                         while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
                             if event.id.0 == "show" {
-                                unsafe {
-                                    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_RESTORE, SW_SHOW, SetForegroundWindow};
-                                    let window_name: Vec<u16> = "MicSplitter\0".encode_utf16().collect();
-                                    let hwnd = FindWindowW(std::ptr::null(), window_name.as_ptr());
-                                    if hwnd != std::ptr::null_mut() {
-                                        ShowWindow(hwnd, SW_RESTORE);
-                                        ShowWindow(hwnd, SW_SHOW);
-                                        SetForegroundWindow(hwnd);
-                                    }
+                                use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_RESTORE, SW_SHOW, SetForegroundWindow};
+                                let window_name: Vec<u16> = "MicSplitter\0".encode_utf16().collect();
+                                let hwnd = FindWindowW(std::ptr::null(), window_name.as_ptr());
+                                if hwnd != std::ptr::null_mut() {
+                                    ShowWindow(hwnd, SW_RESTORE);
+                                    ShowWindow(hwnd, SW_SHOW);
+                                    SetForegroundWindow(hwnd);
                                 }
                                 should_show_clone.store(true, Ordering::SeqCst);
                                 ctx_clone.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
                                 ctx_clone.request_repaint();
                             } else if event.id.0 == "quit" {
+                                if let Some((x, y)) = *window_pos_clone.lock().unwrap() {
+                                    let mut cfg_to_save = config::load_config("config.json");
+                                    cfg_to_save.window_pos_x = Some(x);
+                                    cfg_to_save.window_pos_y = Some(y);
+                                    config::save_config("config.json", &cfg_to_save);
+                                }
                                 std::process::exit(0);
                             }
                         }
@@ -189,12 +278,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // グローバルホットキー (キューに溜まったイベントをすべて消化する)
                         while let Ok(event) = global_hotkey::GlobalHotKeyEvent::receiver().try_recv() {
                             if event.state == global_hotkey::HotKeyState::Pressed {
+                                let is_toggle = is_toggle_clone.load(Ordering::Relaxed);
                                 if Some(event.id) == mon_id {
                                     mon_clone.store(!mon_clone.load(Ordering::Relaxed), Ordering::Relaxed);
                                 } else if Some(event.id) == out1_id {
-                                    out1_clone.store(!out1_clone.load(Ordering::Relaxed), Ordering::Relaxed);
+                                    let new_state = !out1_clone.load(Ordering::Relaxed);
+                                    if new_state && is_toggle { out2_clone.store(false, Ordering::Relaxed); }
+                                    out1_clone.store(new_state, Ordering::Relaxed);
                                 } else if Some(event.id) == out2_id {
-                                    out2_clone.store(!out2_clone.load(Ordering::Relaxed), Ordering::Relaxed);
+                                    let new_state = !out2_clone.load(Ordering::Relaxed);
+                                    if new_state && is_toggle { out1_clone.store(false, Ordering::Relaxed); }
+                                    out2_clone.store(new_state, Ordering::Relaxed);
                                 } else if Some(event.id) == in_id {
                                     in_clone.store(!in_clone.load(Ordering::Relaxed), Ordering::Relaxed);
                                 } else if Some(event.id) == swap_id {
@@ -211,16 +305,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ctx_clone.request_repaint();
                             }
                         }
-                    }
-                });
 
-                // OSメッセージループを回す
-                use windows_sys::Win32::UI::WindowsAndMessaging::{GetMessageW, DispatchMessageW, TranslateMessage, MSG};
-                unsafe {
-                    let mut msg: MSG = std::mem::zeroed();
-                    while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
-                        TranslateMessage(&msg);
-                        DispatchMessageW(&msg);
+                        std::thread::sleep(std::time::Duration::from_millis(50));
                     }
                 }
             });
@@ -230,83 +316,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ).map_err(|e| e.into())
 }
 
-fn build_output<C>(
-    device: &cpal::Device,
-    name: &str,
-    mut consumer: C,
-    in_channels: usize,
-    in_enabled: Arc<AtomicBool>,
-    enabled: Arc<AtomicBool>,
-    volume: f32,
-) -> Result<cpal::Stream, Box<dyn std::error::Error>>
-where
-    C: Consumer<Item = f32> + Send + 'static,
-{
-    let out_config = device.default_output_config()
-        .map_err(|e| format!("デバイス ({}) のデフォルト出力設定取得に失敗: {}", name, e))?;
-    let out_channels = out_config.channels() as usize;
 
-    println!("出力フォーマット ({}): {} Hz, {} ch, {:?}", name, out_config.sample_rate(), out_channels, out_config.sample_format());
-
-    let name_str = name.to_string();
-    let err_fn = move |err| eprintln!("Output error ({}): {}", name_str, err);
-
-    let name_for_err = name.to_string();
-    let device_name = device.to_string();
-
-    match out_config.sample_format() {
-        SampleFormat::F32 => {
-            let stream = device.build_output_stream(
-                out_config.into(),
-                move |data: &mut [f32], _: &_| {
-                    let is_in_enabled = in_enabled.load(Ordering::Relaxed);
-                    let is_enabled = enabled.load(Ordering::Relaxed);
-                    let is_active = is_in_enabled && is_enabled;
-                    let mut input_buffer = vec![0.0; in_channels];
-                    for frame in data.chunks_mut(out_channels) {
-                        for i in 0..in_channels {
-                            if let Some(s) = consumer.try_pop() {
-                                input_buffer[i] = if is_active { s * volume } else { 0.0 };
-                            } else {
-                                input_buffer[i] = 0.0;
-                            }
-                        }
-
-                        for out_c in 0..out_channels {
-                            let in_c = if out_c < in_channels { out_c } else { 0 };
-                            frame[out_c] = input_buffer[in_c];
-                        }
-                    }
-                },
-                err_fn,
-                None,
-            ).map_err(|e| format!("出力デバイス ({}: {}) のストリーム初期化に失敗: {}", name_for_err, device_name, e))?;
-            Ok(stream)
-        }
-        _ => Err(format!("出力デバイス ({}) でサポートされていないフォーマット (f32のみ対応)", name).into()),
-    }
-}
-
-fn find_input_device(host: &cpal::Host, keyword: &str) -> Option<cpal::Device> {
-    if let Ok(devices) = host.input_devices() {
-        for device in devices {
-            let name = device.to_string();
-            if name.contains(keyword) {
-                return Some(device);
-            }
-        }
-    }
-    None
-}
-
-fn find_output_device(host: &cpal::Host, keyword: &str) -> Option<cpal::Device> {
-    if let Ok(devices) = host.output_devices() {
-        for device in devices {
-            let name = device.to_string();
-            if name.contains(keyword) {
-                return Some(device);
-            }
-        }
-    }
-    None
-}

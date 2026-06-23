@@ -18,6 +18,12 @@ pub struct Config {
     pub output_device_1_hotkey: String,
     pub output_device_2_hotkey: String,
     pub auto_start: bool,
+    pub icon_color_both_on: [u8; 3],
+    pub icon_color_out1_on: [u8; 3],
+    pub icon_color_out2_on: [u8; 3],
+    pub icon_color_both_off: [u8; 3],
+    pub window_pos_x: Option<f32>,
+    pub window_pos_y: Option<f32>,
 }
 
 impl Default for Config {
@@ -36,6 +42,12 @@ impl Default for Config {
             output_device_1_hotkey: "Ctrl+Alt+Win+F9".to_string(),
             output_device_2_hotkey: "Ctrl+Alt+Win+F10".to_string(),
             auto_start: false,
+            icon_color_both_on: [255, 255, 0],
+            icon_color_out1_on: [255, 100, 100],
+            icon_color_out2_on: [100, 255, 100],
+            icon_color_both_off: [150, 150, 150],
+            window_pos_x: None,
+            window_pos_y: None,
         }
     }
 }

@@ -1,15 +1,37 @@
 {
   "input_device_name": "MIC (BRIDGE CAST V2)",
-  "output_device_1_name": "CABLE-C Input",
-  "output_device_2_name": "CABLE-D Input",
+  "output_device_1_name": "CABLE-C Input (VB-Audio Cable C)",
+  "output_device_2_name": "CABLE-D Input (VB-Audio Cable D)",
   "monitor_device_name": "GAME (BRIDGE CAST V2)",
   "input_enabled": true,
   "output_device_1_enabled": true,
-  "output_device_2_enabled": true,
+  "output_device_2_enabled": false,
   "monitor_enabled": true,
   "monitor_volume": 0.8,
   "switching_mode": "toggle",
   "output_device_1_hotkey": "Ctrl+Alt+Win+F9",
   "output_device_2_hotkey": "Ctrl+Alt+Win+F10",
-  "auto_start": false
+  "auto_start": false,
+  "icon_color_both_on": [
+    255,
+    255,
+    0
+  ],
+  "icon_color_out1_on": [
+    255,
+    100,
+    100
+  ],
+  "icon_color_out2_on": [
+    100,
+    255,
+    100
+  ],
+  "icon_color_both_off": [
+    150,
+    150,
+    150
+  ],
+  "window_pos_x": 2569.0,
+  "window_pos_y": 0.0
 }
