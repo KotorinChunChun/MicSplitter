@@ -53,6 +53,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_ptt_mode = Arc::new(AtomicBool::new(cfg.switching_mode == "ptt"));
     let ptt_out1_vk = Arc::new(std::sync::atomic::AtomicU32::new(cfg.ptt_out1_hotkey.parse::<u32>().unwrap_or(0)));
     let ptt_out2_vk = Arc::new(std::sync::atomic::AtomicU32::new(cfg.ptt_out2_hotkey.parse::<u32>().unwrap_or(0)));
+    let in_hotkey_vk = Arc::new(std::sync::atomic::AtomicU32::new(hotkey::parse_hotkey(&cfg.input_device_hotkey)));
+    let mon_hotkey_vk = Arc::new(std::sync::atomic::AtomicU32::new(hotkey::parse_hotkey(&cfg.monitor_device_hotkey)));
+    let out1_hotkey_vk = Arc::new(std::sync::atomic::AtomicU32::new(hotkey::parse_hotkey(&cfg.output_device_1_hotkey)));
+    let out2_hotkey_vk = Arc::new(std::sync::atomic::AtomicU32::new(hotkey::parse_hotkey(&cfg.output_device_2_hotkey)));
     let mon_volume_bits = Arc::new(std::sync::atomic::AtomicU32::new(cfg.monitor_volume.to_bits()));
 
     let in_rms_bits = Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -135,12 +139,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         device_refresh_rx: Some(device_refresh_rx),
         window_pos: window_pos.clone(),
         window_size: window_size.clone(),
-        waiting_for_ptt1_key: false,
-        waiting_for_ptt2_key: false,
-        ptt_initial_keys: None,
+        waiting_for_key: app::WaitingForKey::None,
+        hotkey_initial_keys: None,
         is_ptt_mode: is_ptt_mode.clone(),
         ptt_out1_vk: ptt_out1_vk.clone(),
         ptt_out2_vk: ptt_out2_vk.clone(),
+        in_hotkey_vk: in_hotkey_vk.clone(),
+        mon_hotkey_vk: mon_hotkey_vk.clone(),
+        out1_hotkey_vk: out1_hotkey_vk.clone(),
+        out2_hotkey_vk: out2_hotkey_vk.clone(),
     };
 
     let mut native_options = eframe::NativeOptions::default();
@@ -182,9 +189,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let should_show_clone = should_show.clone();
             let window_pos_clone = window_pos.clone();
             let window_size_clone = window_size.clone();
+            let is_toggle_mode_clone = is_toggle_mode.clone();
             let is_ptt_mode_clone = is_ptt_mode.clone();
             let ptt_out1_vk_clone = ptt_out1_vk.clone();
             let ptt_out2_vk_clone = ptt_out2_vk.clone();
+            let in_hotkey_vk_clone = in_hotkey_vk.clone();
+            let mon_hotkey_vk_clone = mon_hotkey_vk.clone();
+            let out1_hotkey_vk_clone = out1_hotkey_vk.clone();
+            let out2_hotkey_vk_clone = out2_hotkey_vk.clone();
             let udp_receiver = udp_receiver;
             let cfg_clone = cfg.clone();
 
@@ -194,20 +206,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let initial_out1 = out1_clone.load(Ordering::Relaxed);
                 let initial_out2 = out2_clone.load(Ordering::Relaxed);
                 let tray_opt = tray::create_tray_icon(initial_in, initial_out1, initial_out2, &cfg_clone).ok();
-                let hotkeys = match hotkey::register_hotkeys() {
-                    Ok(h) => Some(h),
-                    Err(e) => {
-                        println!("ホットキーの登録に失敗しました: {:?}", e);
-                        None
-                    }
-                };
-                
-                // HotkeyのIDだけを抽出
-                let (mon_id, out1_id, out2_id, in_id) = if let Some(ref h) = hotkeys {
-                    (Some(h.toggle_mon_id), Some(h.toggle_out1_id), Some(h.toggle_out2_id), Some(h.toggle_in_id))
-                } else {
-                    (None, None, None, None)
-                };
 
                 use windows_sys::Win32::UI::WindowsAndMessaging::{PeekMessageW, DispatchMessageW, TranslateMessage, MSG, PM_REMOVE};
                 unsafe {
@@ -217,6 +215,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut last_out2 = initial_out2;
                     let mut was_ptt1_pressed = false;
                     let mut was_ptt2_pressed = false;
+                    let mut was_in_hotkey_pressed = false;
+                    let mut was_mon_hotkey_pressed = false;
+                    let mut was_out1_hotkey_pressed = false;
+                    let mut was_out2_hotkey_pressed = false;
 
                     loop {
                         while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) > 0 {
@@ -284,22 +286,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
-                        // グローバルホットキー（キューに溜まったイベントをすべて消化する）
-                        while let Ok(event) = global_hotkey::GlobalHotKeyEvent::receiver().try_recv() {
-                            if event.state == global_hotkey::HotKeyState::Pressed {
-                                if Some(event.id) == mon_id {
-                                    mon_clone.store(!mon_clone.load(Ordering::Relaxed), Ordering::Relaxed);
-                                } else if Some(event.id) == out1_id {
+                        // グローバルホットキー（カスタム検知）
+                        let hk_in = in_hotkey_vk_clone.load(Ordering::Relaxed);
+                        if hk_in > 0 {
+                            let is_pressed = hotkey::is_hotkey_pressed(hk_in);
+                            if is_pressed && !was_in_hotkey_pressed {
+                                in_clone.store(!in_clone.load(Ordering::Relaxed), Ordering::Relaxed);
+                                ctx_clone.request_repaint();
+                            }
+                            was_in_hotkey_pressed = is_pressed;
+                        }
+
+                        let hk_mon = mon_hotkey_vk_clone.load(Ordering::Relaxed);
+                        if hk_mon > 0 {
+                            let is_pressed = hotkey::is_hotkey_pressed(hk_mon);
+                            if is_pressed && !was_mon_hotkey_pressed {
+                                mon_clone.store(!mon_clone.load(Ordering::Relaxed), Ordering::Relaxed);
+                                ctx_clone.request_repaint();
+                            }
+                            was_mon_hotkey_pressed = is_pressed;
+                        }
+
+                        let hk_out1 = out1_hotkey_vk_clone.load(Ordering::Relaxed);
+                        if hk_out1 > 0 {
+                            let is_pressed = hotkey::is_hotkey_pressed(hk_out1);
+                            if is_pressed && !was_out1_hotkey_pressed {
+                                if is_toggle_mode_clone.load(Ordering::Relaxed) {
                                     out1_clone.store(true, Ordering::Relaxed);
                                     out2_clone.store(false, Ordering::Relaxed);
-                                } else if Some(event.id) == out2_id {
-                                    out1_clone.store(false, Ordering::Relaxed);
-                                    out2_clone.store(true, Ordering::Relaxed);
-                                } else if Some(event.id) == in_id {
-                                    in_clone.store(!in_clone.load(Ordering::Relaxed), Ordering::Relaxed);
+                                } else {
+                                    out1_clone.store(!out1_clone.load(Ordering::Relaxed), Ordering::Relaxed);
                                 }
                                 ctx_clone.request_repaint();
                             }
+                            was_out1_hotkey_pressed = is_pressed;
+                        }
+
+                        let hk_out2 = out2_hotkey_vk_clone.load(Ordering::Relaxed);
+                        if hk_out2 > 0 {
+                            let is_pressed = hotkey::is_hotkey_pressed(hk_out2);
+                            if is_pressed && !was_out2_hotkey_pressed {
+                                if is_toggle_mode_clone.load(Ordering::Relaxed) {
+                                    out1_clone.store(false, Ordering::Relaxed);
+                                    out2_clone.store(true, Ordering::Relaxed);
+                                } else {
+                                    out2_clone.store(!out2_clone.load(Ordering::Relaxed), Ordering::Relaxed);
+                                }
+                                ctx_clone.request_repaint();
+                            }
+                            was_out2_hotkey_pressed = is_pressed;
                         }
 
                         // PTT (Push To Talk) の監視

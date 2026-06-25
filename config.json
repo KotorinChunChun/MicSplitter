@@ -9,6 +9,8 @@
   "monitor_enabled": false,
   "monitor_volume": 0.8,
   "switching_mode": "toggle",
+  "input_device_hotkey": "Ctrl+Alt+Win+F7",
+  "monitor_device_hotkey": "Ctrl+Alt+Win+F8",
   "output_device_1_hotkey": "Ctrl+Alt+Win+F9",
   "output_device_2_hotkey": "Ctrl+Alt+Win+F10",
   "ptt_out1_hotkey": "29",

@@ -24,6 +24,8 @@ pub struct Config {
     pub switching_mode: String,
 
     // --- ショートカットキー ---
+    pub input_device_hotkey: String,
+    pub monitor_device_hotkey: String,
     pub output_device_1_hotkey: String,
     pub output_device_2_hotkey: String,
     pub ptt_out1_hotkey: String,
@@ -73,6 +75,8 @@ impl Default for Config {
             monitor_enabled: true,
             monitor_volume: 0.8,
             switching_mode: "toggle".to_string(),
+            input_device_hotkey: "Ctrl+Alt+Win+F7".to_string(),
+            monitor_device_hotkey: "Ctrl+Alt+Win+F8".to_string(),
             output_device_1_hotkey: "Ctrl+Alt+Win+F9".to_string(),
             output_device_2_hotkey: "Ctrl+Alt+Win+F10".to_string(),
             ptt_out1_hotkey: "".to_string(),

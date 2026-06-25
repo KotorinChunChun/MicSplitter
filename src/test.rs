@@ -1,8 +1,7 @@
-use cpal::traits::{DeviceTrait, HostTrait};
+use std::str::FromStr;
+use global_hotkey::hotkey::HotKey;
 
 fn main() {
-    let host = cpal::default_host();
-    if let Some(dev) = host.default_input_device() {
-        println!("{}", dev.name().unwrap());
-    }
+    let hk = HotKey::from_str("Ctrl+Alt+Win+F9").unwrap();
+    println!("Parsed: {:?}", hk);
 }

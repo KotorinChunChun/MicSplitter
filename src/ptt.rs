@@ -91,3 +91,12 @@ pub fn vk_to_string(vk: u16) -> String {
         _ => format!("VK_{}", vk),
     }
 }
+
+pub fn string_to_vk(s: &str) -> u16 {
+    for vk in 8..=254 {
+        if vk_to_string(vk).eq_ignore_ascii_case(s) {
+            return vk;
+        }
+    }
+    0
+}
