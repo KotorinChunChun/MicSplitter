@@ -11,6 +11,8 @@
   "switching_mode": "toggle",
   "output_device_1_hotkey": "Ctrl+Alt+Win+F9",
   "output_device_2_hotkey": "Ctrl+Alt+Win+F10",
+  "ptt_out1_hotkey": "29",
+  "ptt_out2_hotkey": "28",
   "auto_start": false,
   "icon_color_out1_on": [
     255,

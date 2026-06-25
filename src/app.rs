@@ -36,6 +36,12 @@ pub struct MicSplitterApp {
     pub device_refresh_rx: Option<std::sync::mpsc::Receiver<()>>,
     pub window_pos: Arc<std::sync::Mutex<Option<(f32, f32)>>>,
     pub window_size: Arc<std::sync::Mutex<Option<(f32, f32)>>>,
+    pub waiting_for_ptt1_key: bool,
+    pub waiting_for_ptt2_key: bool,
+    pub ptt_initial_keys: Option<[bool; 256]>,
+    pub is_ptt_mode: Arc<AtomicBool>,
+    pub ptt_out1_vk: Arc<std::sync::atomic::AtomicU32>,
+    pub ptt_out2_vk: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl MicSplitterApp {
@@ -255,6 +261,120 @@ impl MicSplitterApp {
             ui.label("モニターミュート: Ctrl + Alt + Win + F8");
             ui.label("出力1 (仮想マイクA) をON: Ctrl + Alt + Win + F9");
             ui.label("出力2 (仮想マイクB) をON: Ctrl + Alt + Win + F10");
+
+            ui.separator();
+            ui.label("【プッシュ・トゥ・トーク (PTT) キー設定】");
+            
+            // 出力1 PTTキー設定
+            ui.horizontal(|ui| {
+                ui.label("出力1 (仮想マイクA):");
+                if self.waiting_for_ptt1_key {
+                    let _ = ui.button("キー入力待ち... (任意のキーを押してください)");
+                    // PTT1のキー入力をスキャン
+                    let mut detected_vk = None;
+                    for vk in 8..=254 {
+                        // マウスボタン (1, 2, 4, 5, 6) は除外
+                        if vk == 1 || vk == 2 || vk == 4 || vk == 5 || vk == 6 { continue; }
+                        unsafe {
+                            let is_down = (windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk) as u16 & 0x8000) != 0;
+                            if is_down {
+                                // 開始時に既に押されていたキーは無視する
+                                if let Some(initials) = self.ptt_initial_keys {
+                                    if !initials[vk as usize] {
+                                        detected_vk = Some(vk);
+                                        break;
+                                    }
+                                } else {
+                                    detected_vk = Some(vk);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if let Some(vk) = detected_vk {
+                        self.config.ptt_out1_hotkey = vk.to_string();
+                        self.ptt_out1_vk.store(vk as u32, Ordering::Relaxed);
+                        self.waiting_for_ptt1_key = false;
+                        self.ptt_initial_keys = None;
+                        config_changed = true;
+                    }
+                } else {
+                    let key_str = if self.config.ptt_out1_hotkey.is_empty() {
+                        "未設定".to_string()
+                    } else if let Ok(vk) = self.config.ptt_out1_hotkey.parse::<u16>() {
+                        crate::ptt::vk_to_string(vk)
+                    } else {
+                        "エラー".to_string()
+                    };
+                    if ui.button(format!("[ {} ] (クリックして変更)", key_str)).clicked() {
+                        self.waiting_for_ptt1_key = true;
+                        self.waiting_for_ptt2_key = false; // 排他
+                        // 現在押されているキーを記録する
+                        let mut initials = [false; 256];
+                        for vk in 8..=254 {
+                            unsafe {
+                                let is_down = (windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk) as u16 & 0x8000) != 0;
+                                initials[vk as usize] = is_down;
+                            }
+                        }
+                        self.ptt_initial_keys = Some(initials);
+                    }
+                }
+            });
+
+            // 出力2 PTTキー設定
+            ui.horizontal(|ui| {
+                ui.label("出力2 (仮想マイクB):");
+                if self.waiting_for_ptt2_key {
+                    let _ = ui.button("キー入力待ち... (任意のキーを押してください)");
+                    // PTT2のキー入力をスキャン
+                    let mut detected_vk = None;
+                    for vk in 8..=254 {
+                        if vk == 1 || vk == 2 || vk == 4 || vk == 5 || vk == 6 { continue; }
+                        unsafe {
+                            let is_down = (windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk) as u16 & 0x8000) != 0;
+                            if is_down {
+                                if let Some(initials) = self.ptt_initial_keys {
+                                    if !initials[vk as usize] {
+                                        detected_vk = Some(vk);
+                                        break;
+                                    }
+                                } else {
+                                    detected_vk = Some(vk);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if let Some(vk) = detected_vk {
+                        self.config.ptt_out2_hotkey = vk.to_string();
+                        self.ptt_out2_vk.store(vk as u32, Ordering::Relaxed);
+                        self.waiting_for_ptt2_key = false;
+                        self.ptt_initial_keys = None;
+                        config_changed = true;
+                    }
+                } else {
+                    let key_str = if self.config.ptt_out2_hotkey.is_empty() {
+                        "未設定".to_string()
+                    } else if let Ok(vk) = self.config.ptt_out2_hotkey.parse::<u16>() {
+                        crate::ptt::vk_to_string(vk)
+                    } else {
+                        "エラー".to_string()
+                    };
+                    if ui.button(format!("[ {} ] (クリックして変更)", key_str)).clicked() {
+                        self.waiting_for_ptt2_key = true;
+                        self.waiting_for_ptt1_key = false; // 排他
+                        let mut initials = [false; 256];
+                        for vk in 8..=254 {
+                            unsafe {
+                                let is_down = (windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk) as u16 & 0x8000) != 0;
+                                initials[vk as usize] = is_down;
+                            }
+                        }
+                        self.ptt_initial_keys = Some(initials);
+                    }
+                }
+            });
         });
         config_changed
     }
@@ -299,14 +419,31 @@ impl MicSplitterApp {
                 ui.label("切り替えモード:");
                 if ui.radio_value(&mut self.config.switching_mode, "toggle".to_string(), "トグル (排他)").changed() {
                     self.is_toggle_mode.store(true, Ordering::Relaxed);
-                    if self.config.output_device_1_enabled && self.config.output_device_2_enabled {
+                    self.is_ptt_mode.store(false, Ordering::Relaxed);
+                    // 両方OFF、または両方ONの場合は出力1のみをONにする
+                    if (!self.config.output_device_1_enabled && !self.config.output_device_2_enabled)
+                        || (self.config.output_device_1_enabled && self.config.output_device_2_enabled)
+                    {
+                        self.config.output_device_1_enabled = true;
                         self.config.output_device_2_enabled = false;
+                        self.out1_enabled.store(true, Ordering::Relaxed);
                         self.out2_enabled.store(false, Ordering::Relaxed);
                     }
                     config_changed = true;
                 }
                 if ui.radio_value(&mut self.config.switching_mode, "individual".to_string(), "個別ON/OFF").changed() {
                     self.is_toggle_mode.store(false, Ordering::Relaxed);
+                    self.is_ptt_mode.store(false, Ordering::Relaxed);
+                    config_changed = true;
+                }
+                if ui.radio_value(&mut self.config.switching_mode, "ptt".to_string(), "プッシュトゥトーク").changed() {
+                    self.is_toggle_mode.store(false, Ordering::Relaxed);
+                    self.is_ptt_mode.store(true, Ordering::Relaxed);
+                    // PTTモードではデフォルト両方ミュートにする
+                    self.config.output_device_1_enabled = false;
+                    self.config.output_device_2_enabled = false;
+                    self.out1_enabled.store(false, Ordering::Relaxed);
+                    self.out2_enabled.store(false, Ordering::Relaxed);
                     config_changed = true;
                 }
             });

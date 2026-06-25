@@ -7,6 +7,7 @@ mod tray;
 mod hotkey;
 mod audio;
 mod ui_helpers;
+mod ptt;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. コマンドライン引数の解析
@@ -49,6 +50,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mon_enabled = Arc::new(AtomicBool::new(cfg.monitor_enabled));
 
     let is_toggle_mode = Arc::new(AtomicBool::new(cfg.switching_mode == "toggle"));
+    let is_ptt_mode = Arc::new(AtomicBool::new(cfg.switching_mode == "ptt"));
+    let ptt_out1_vk = Arc::new(std::sync::atomic::AtomicU32::new(cfg.ptt_out1_hotkey.parse::<u32>().unwrap_or(0)));
+    let ptt_out2_vk = Arc::new(std::sync::atomic::AtomicU32::new(cfg.ptt_out2_hotkey.parse::<u32>().unwrap_or(0)));
     let mon_volume_bits = Arc::new(std::sync::atomic::AtomicU32::new(cfg.monitor_volume.to_bits()));
 
     let in_rms_bits = Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -131,6 +135,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         device_refresh_rx: Some(device_refresh_rx),
         window_pos: window_pos.clone(),
         window_size: window_size.clone(),
+        waiting_for_ptt1_key: false,
+        waiting_for_ptt2_key: false,
+        ptt_initial_keys: None,
+        is_ptt_mode: is_ptt_mode.clone(),
+        ptt_out1_vk: ptt_out1_vk.clone(),
+        ptt_out2_vk: ptt_out2_vk.clone(),
     };
 
     let mut native_options = eframe::NativeOptions::default();
@@ -172,6 +182,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let should_show_clone = should_show.clone();
             let window_pos_clone = window_pos.clone();
             let window_size_clone = window_size.clone();
+            let is_ptt_mode_clone = is_ptt_mode.clone();
+            let ptt_out1_vk_clone = ptt_out1_vk.clone();
+            let ptt_out2_vk_clone = ptt_out2_vk.clone();
             let udp_receiver = udp_receiver;
             let cfg_clone = cfg.clone();
 
@@ -202,6 +215,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut last_in = initial_in;
                     let mut last_out1 = initial_out1;
                     let mut last_out2 = initial_out2;
+                    let mut was_ptt1_pressed = false;
+                    let mut was_ptt2_pressed = false;
 
                     loop {
                         while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) > 0 {
@@ -285,6 +300,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 ctx_clone.request_repaint();
                             }
+                        }
+
+                        // PTT (Push To Talk) の監視
+                        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+                        
+                        if is_ptt_mode_clone.load(Ordering::Relaxed) {
+                            let ptt1_vk = ptt_out1_vk_clone.load(Ordering::Relaxed);
+                            if ptt1_vk > 0 {
+                                let is_pressed = (GetAsyncKeyState(ptt1_vk as i32) as u16 & 0x8000) != 0;
+                                if is_pressed && !was_ptt1_pressed {
+                                    out1_clone.store(true, Ordering::Relaxed);
+                                    ctx_clone.request_repaint();
+                                } else if !is_pressed && was_ptt1_pressed {
+                                    out1_clone.store(false, Ordering::Relaxed);
+                                    ctx_clone.request_repaint();
+                                }
+                                was_ptt1_pressed = is_pressed;
+                            }
+
+                            let ptt2_vk = ptt_out2_vk_clone.load(Ordering::Relaxed);
+                            if ptt2_vk > 0 {
+                                let is_pressed = (GetAsyncKeyState(ptt2_vk as i32) as u16 & 0x8000) != 0;
+                                if is_pressed && !was_ptt2_pressed {
+                                    out2_clone.store(true, Ordering::Relaxed);
+                                    ctx_clone.request_repaint();
+                                } else if !is_pressed && was_ptt2_pressed {
+                                    out2_clone.store(false, Ordering::Relaxed);
+                                    ctx_clone.request_repaint();
+                                }
+                                was_ptt2_pressed = is_pressed;
+                            }
+                        } else {
+                            // PTTモードではない場合は状態をリセット
+                            was_ptt1_pressed = false;
+                            was_ptt2_pressed = false;
                         }
 
                         std::thread::sleep(std::time::Duration::from_millis(constants::EVENT_LOOP_INTERVAL_MS));

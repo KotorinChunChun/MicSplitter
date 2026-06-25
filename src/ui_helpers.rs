@@ -162,7 +162,7 @@ pub fn routing_button_ui(
     min_width: f32,
 ) -> egui::Response {
     let fill_color = if is_invalid {
-        egui::Color32::from_rgb(180, 50, 50) // 赤（無効・未選択）
+        ui.style().visuals.widgets.inactive.bg_fill // デフォルト（グレー）
     } else if is_enabled {
         egui::Color32::from_rgb(0, 150, 0) // 緑（ON）
     } else {
@@ -170,7 +170,7 @@ pub fn routing_button_ui(
     };
 
     let text_color = if is_invalid {
-        egui::Color32::from_rgb(255, 200, 200)
+        ui.style().visuals.text_color() // デフォルト
     } else if is_enabled {
         egui::Color32::WHITE
     } else {

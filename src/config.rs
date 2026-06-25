@@ -26,6 +26,8 @@ pub struct Config {
     // --- ショートカットキー ---
     pub output_device_1_hotkey: String,
     pub output_device_2_hotkey: String,
+    pub ptt_out1_hotkey: String,
+    pub ptt_out2_hotkey: String,
 
     // --- スタートアップ ---
     pub auto_start: bool,
@@ -73,6 +75,8 @@ impl Default for Config {
             switching_mode: "toggle".to_string(),
             output_device_1_hotkey: "Ctrl+Alt+Win+F9".to_string(),
             output_device_2_hotkey: "Ctrl+Alt+Win+F10".to_string(),
+            ptt_out1_hotkey: "".to_string(),
+            ptt_out2_hotkey: "".to_string(),
             auto_start: false,
             icon_color_out1_on: [255, 100, 100],
             icon_color_out2_on: [100, 255, 100],
