@@ -60,6 +60,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window_pos = Arc::new(std::sync::Mutex::new(
         if let (Some(x), Some(y)) = (cfg.window_pos_x, cfg.window_pos_y) { Some((x, y)) } else { None }
     ));
+    let window_size = Arc::new(std::sync::Mutex::new(
+        if let (Some(w), Some(h)) = (cfg.window_size_x, cfg.window_size_y) { Some((w, h)) } else { None }
+    ));
 
     let streams = audio::build_all_streams(
         &cfg,
@@ -127,6 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mon_device_info,
         device_refresh_rx: Some(device_refresh_rx),
         window_pos: window_pos.clone(),
+        window_size: window_size.clone(),
     };
 
     let mut native_options = eframe::NativeOptions::default();
@@ -145,6 +149,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         viewport = viewport.with_position(eframe::egui::pos2(x, y));
     }
+    if let (Some(w), Some(h)) = (cfg.window_size_x, cfg.window_size_y) {
+        viewport = viewport.with_inner_size(eframe::egui::vec2(w, h));
+    }
     native_options.viewport = viewport;
 
     eframe::run_native(
@@ -162,9 +169,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let out1_clone = out1_enabled.clone();
             let out2_clone = out2_enabled.clone();
             let mon_clone = mon_enabled.clone();
-            let is_toggle_clone = is_toggle_mode.clone();
             let should_show_clone = should_show.clone();
             let window_pos_clone = window_pos.clone();
+            let window_size_clone = window_size.clone();
             let udp_receiver = udp_receiver;
             let cfg_clone = cfg.clone();
 
@@ -183,10 +190,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 
                 // HotkeyのIDだけを抽出
-                let (mon_id, out1_id, out2_id, in_id, swap_id) = if let Some(ref h) = hotkeys {
-                    (Some(h.toggle_mon_id), Some(h.toggle_out1_id), Some(h.toggle_out2_id), Some(h.toggle_in_id), Some(h.toggle_swap_id))
+                let (mon_id, out1_id, out2_id, in_id) = if let Some(ref h) = hotkeys {
+                    (Some(h.toggle_mon_id), Some(h.toggle_out1_id), Some(h.toggle_out2_id), Some(h.toggle_in_id))
                 } else {
-                    (None, None, None, None, None)
+                    (None, None, None, None)
                 };
 
                 use windows_sys::Win32::UI::WindowsAndMessaging::{PeekMessageW, DispatchMessageW, TranslateMessage, MSG, PM_REMOVE};
@@ -248,12 +255,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ctx_clone.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
                                 ctx_clone.request_repaint();
                             } else if event.id.0 == "quit" {
+                                let mut cfg_to_save = config::load_config(constants::CONFIG_FILE);
                                 if let Some((x, y)) = *window_pos_clone.lock().unwrap() {
-                                    let mut cfg_to_save = config::load_config(constants::CONFIG_FILE);
                                     cfg_to_save.window_pos_x = Some(x);
                                     cfg_to_save.window_pos_y = Some(y);
-                                    config::save_config(constants::CONFIG_FILE, &cfg_to_save);
                                 }
+                                if let Some((w, h)) = *window_size_clone.lock().unwrap() {
+                                    cfg_to_save.window_size_x = Some(w);
+                                    cfg_to_save.window_size_y = Some(h);
+                                }
+                                config::save_config(constants::CONFIG_FILE, &cfg_to_save);
                                 std::process::exit(0);
                             }
                         }
@@ -261,29 +272,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // グローバルホットキー（キューに溜まったイベントをすべて消化する）
                         while let Ok(event) = global_hotkey::GlobalHotKeyEvent::receiver().try_recv() {
                             if event.state == global_hotkey::HotKeyState::Pressed {
-                                let is_toggle = is_toggle_clone.load(Ordering::Relaxed);
                                 if Some(event.id) == mon_id {
                                     mon_clone.store(!mon_clone.load(Ordering::Relaxed), Ordering::Relaxed);
                                 } else if Some(event.id) == out1_id {
-                                    let new_state = !out1_clone.load(Ordering::Relaxed);
-                                    if new_state && is_toggle { out2_clone.store(false, Ordering::Relaxed); }
-                                    out1_clone.store(new_state, Ordering::Relaxed);
+                                    out1_clone.store(true, Ordering::Relaxed);
+                                    out2_clone.store(false, Ordering::Relaxed);
                                 } else if Some(event.id) == out2_id {
-                                    let new_state = !out2_clone.load(Ordering::Relaxed);
-                                    if new_state && is_toggle { out1_clone.store(false, Ordering::Relaxed); }
-                                    out2_clone.store(new_state, Ordering::Relaxed);
+                                    out1_clone.store(false, Ordering::Relaxed);
+                                    out2_clone.store(true, Ordering::Relaxed);
                                 } else if Some(event.id) == in_id {
                                     in_clone.store(!in_clone.load(Ordering::Relaxed), Ordering::Relaxed);
-                                } else if Some(event.id) == swap_id {
-                                    let out1 = out1_clone.load(Ordering::Relaxed);
-                                    let out2 = out2_clone.load(Ordering::Relaxed);
-                                    if out1 && !out2 {
-                                        out1_clone.store(false, Ordering::Relaxed);
-                                        out2_clone.store(true, Ordering::Relaxed);
-                                    } else {
-                                        out1_clone.store(true, Ordering::Relaxed);
-                                        out2_clone.store(false, Ordering::Relaxed);
-                                    }
                                 }
                                 ctx_clone.request_repaint();
                             }

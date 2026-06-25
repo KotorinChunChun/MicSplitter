@@ -35,9 +35,11 @@ pub struct Config {
     pub icon_color_out2_on: [u8; 3],
     pub icon_color_both_off: [u8; 3],
 
-    // --- ウィンドウ位置 ---
+    // --- ウィンドウ位置・サイズ ---
     pub window_pos_x: Option<f32>,
     pub window_pos_y: Option<f32>,
+    pub window_size_x: Option<f32>,
+    pub window_size_y: Option<f32>,
 
     // --- トレイアイコンサイズ ---
     pub tray_icon_size: u32,
@@ -77,6 +79,8 @@ impl Default for Config {
             icon_color_both_off: [150, 150, 150],
             window_pos_x: None,
             window_pos_y: None,
+            window_size_x: None,
+            window_size_y: None,
             tray_icon_size: 32,
             meter_width: 150.0,
             meter_height: 16.0,

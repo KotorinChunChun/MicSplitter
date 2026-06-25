@@ -54,6 +54,7 @@ pub fn show_and_focus_window() {
 /// - `device_list`: 選択肢となるデバイス名の一覧
 /// - `device_info`: デバイス情報 (サンプルレート, ビット深度, OS音量) - None の場合は切断扱い
 /// - `color_icon`: ラベル左側に表示するカラーアイコンの色（省略可能）
+/// - `allow_unselected`: 未選択状態を許可するかどうか
 ///
 /// # 戻り値
 /// デバイス名が変更された場合に `true`
@@ -65,9 +66,11 @@ pub fn device_combo_box(
     device_list: &[String],
     device_info: &Option<(u32, String, f32)>,
     color_icon: Option<[u8; 3]>,
+    allow_unselected: bool,
 ) -> bool {
     let mut changed = false;
-    let is_invalid = device_info.is_none();
+    let is_unselected = allow_unselected && current_name == "(未選択)";
+    let is_invalid = is_unselected || device_info.is_none();
 
     ui.horizontal(|ui| {
         // カラーアイコンの描画（指定された場合のみ）
@@ -90,6 +93,12 @@ pub fn device_combo_box(
             .selected_text(selected_text)
             .show_ui(ui, |ui| {
                 let mut display_list = device_list.to_vec();
+                if allow_unselected {
+                    let unselected_str = "(未選択)".to_string();
+                    if !display_list.contains(&unselected_str) {
+                        display_list.insert(0, unselected_str);
+                    }
+                }
                 if !display_list.contains(current_name) {
                     display_list.insert(0, current_name.clone());
                 }
@@ -111,6 +120,72 @@ pub fn device_combo_box(
     });
 
     changed
+}
+
+/// 出力デバイス名から対応する仮想マイク（録音デバイス）の名前を検索する
+pub fn find_corresponding_virtual_mic(output_name: &str, input_devices: &[String]) -> Option<String> {
+    if output_name == "(未選択)" {
+        return None;
+    }
+    
+    // VB-Audio Cableの対応表に基づくプレフィックスの抽出
+    let prefix = if output_name.contains("CABLE-A") {
+        "CABLE-A"
+    } else if output_name.contains("CABLE-B") {
+        "CABLE-B"
+    } else if output_name.contains("CABLE-C") {
+        "CABLE-C"
+    } else if output_name.contains("CABLE-D") {
+        "CABLE-D"
+    } else if output_name.contains("CABLE") {
+        "CABLE"
+    } else {
+        return None; // 対応していないデバイス
+    };
+
+    let target_str = format!("{} Output", prefix);
+    for device in input_devices {
+        if device.contains(&target_str) {
+            return Some(device.clone());
+        }
+    }
+    None
+}
+
+/// フロー図用のカスタムボタン描画
+pub fn routing_button_ui(
+    ui: &mut egui::Ui,
+    label: &str,
+    is_enabled: bool,
+    is_invalid: bool,
+    is_interactive: bool,
+    min_width: f32,
+) -> egui::Response {
+    let fill_color = if is_invalid {
+        egui::Color32::from_rgb(180, 50, 50) // 赤（無効・未選択）
+    } else if is_enabled {
+        egui::Color32::from_rgb(0, 150, 0) // 緑（ON）
+    } else {
+        ui.style().visuals.widgets.inactive.bg_fill // デフォルト（OFF）
+    };
+
+    let text_color = if is_invalid {
+        egui::Color32::from_rgb(255, 200, 200)
+    } else if is_enabled {
+        egui::Color32::WHITE
+    } else {
+        ui.style().visuals.text_color()
+    };
+
+    let button = egui::Button::new(egui::RichText::new(label).color(text_color))
+        .fill(fill_color)
+        .min_size(egui::vec2(min_width, 0.0));
+    
+    if !is_interactive || is_invalid {
+        ui.add(button.sense(egui::Sense::hover()))
+    } else {
+        ui.add(button)
+    }
 }
 
 // ========================================================================

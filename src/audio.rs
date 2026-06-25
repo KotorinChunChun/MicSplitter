@@ -67,6 +67,9 @@ pub fn get_output_devices() -> Vec<String> {
 }
 
 pub fn find_device(host: &cpal::Host, keyword: &str, is_input: bool) -> Option<cpal::Device> {
+    if keyword == "(未選択)" {
+        return None;
+    }
     let devices = if is_input { host.input_devices().ok()? } else { host.output_devices().ok()? };
     for device in devices {
         let name = device.to_string();
